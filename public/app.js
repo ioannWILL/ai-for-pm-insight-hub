@@ -6,6 +6,7 @@ const VIEWS = [
   { id: "backlog", label: "Backlog" },
   { id: "evidence", label: "Evidence & coverage" },
   { id: "ask", label: "Ask the interviews" },
+  { id: "docs", label: "Docs" },
   { id: "process", label: "Process" },
   { id: "settings", label: "Settings" },
 ];
@@ -26,6 +27,7 @@ const S = {
   cfg: null, kb: null, view: "personas", persona: "all", product: "all", jp: null, sols: new Map(),
   riceSort: { k: "score", d: -1 }, riceStatus: "all", riceQ: "", chat: [], asking: null,
   tax: null, transcripts: [], job: null, demo: false, wiz: null, pending: false,
+  doc: { manifest: null, page: null },
 };
 const nugIndex = new Map(), srcIndex = new Map();
 const $ = (s, el = document) => el.querySelector(s);
@@ -69,11 +71,26 @@ async function boot() {
   S.cfg = await api("/api/config");
   if (!S.cfg.setupDone) { S.wiz = { step: 0, draft: { ...S.cfg } }; return renderWizard(); }
   await Promise.all([loadKb(), loadProcess()]);
-  const h = location.hash.slice(1);
-  S.view = VIEWS.some((v) => v.id === h) ? h : S.kb ? "personas" : "process";
+  const r = parseHash();
+  S.view = r.view || (S.kb ? "personas" : "process");
+  S.doc.page = r.docPage;
   if (S.job?.running) pollJob();
   renderChrome(); render();
 }
+function parseHash() {
+  const h = location.hash.slice(1);
+  const [head, ...rest] = h.split("/");
+  if (head === "docs") return { view: "docs", docPage: rest.join("/") || null };
+  return { view: VIEWS.some((v) => v.id === head) ? head : null, docPage: null };
+}
+// back/forward and in-page doc links change the hash; keep the view in sync
+window.addEventListener("hashchange", () => {
+  const r = parseHash();
+  if (!r.view) return;
+  if (r.view === S.view && r.docPage === S.doc.page) return;
+  S.view = r.view; S.doc.page = r.docPage;
+  renderChrome(); render();
+});
 
 function updateMeta() {
   $("#title").textContent = S.kb?.product?.name ? `${S.kb.product.name} · Insight Hub` : "Insight Hub";
@@ -124,7 +141,7 @@ function render() {
   // don't wipe a field the user is typing in; render once they leave it
   if (ae && m.contains(ae) && (ae.tagName === "TEXTAREA" || (ae.tagName === "INPUT" && !["checkbox", "radio"].includes(ae.type))) && ae.dataset.live !== "1") { S.pending = true; return; }
   const refocus = ae?.id === "ask-input";
-  const fn = { personas: vPersonas, journeys: vJourneys, rice: vRice, backlog: vBacklog, evidence: vEvidence, ask: vAsk, process: vProcess, settings: vSettings }[S.view];
+  const fn = { personas: vPersonas, journeys: vJourneys, rice: vRice, backlog: vBacklog, evidence: vEvidence, ask: vAsk, docs: vDocs, process: vProcess, settings: vSettings }[S.view];
   m.innerHTML = "";
   m.append(DATA_VIEWS.has(S.view) && !S.kb ? vEmpty() : fn());
   if (keep != null && $("#ask-input")) { $("#ask-input").value = keep; if (refocus) $("#ask-input").focus(); }
@@ -436,6 +453,104 @@ async function ask(q) {
   } catch (e) {
     if (e.name === "AbortError") S.chat.pop(); else S.askNote = e.message;
   } finally { S.asking = null; render(); }
+}
+
+// ---------- docs (Docusaurus-style) ----------
+const slugify = (s) => String(s).toLowerCase().replace(/[^\w]+/g, "-").replace(/^-+|-+$/g, "");
+const docMdCache = new Map();
+// The sidebar structure lives here; page bodies are Markdown files in public/docs/.
+// To add a page: drop public/docs/<id>.md and add { id, title } to a category below.
+const DOCS_MANIFEST = {
+  title: "Insight Hub docs",
+  sidebar: [
+    { category: "Getting started", items: [{ id: "introduction", title: "Introduction" }, { id: "install", title: "Install & run" }, { id: "setup", title: "First-time setup" }] },
+    { category: "How it works", items: [{ id: "pipeline", title: "The pipeline" }, { id: "files", title: "Files it writes" }] },
+    { category: "Using the board", items: [{ id: "personas", title: "Personas" }, { id: "journeys", title: "Journey maps" }, { id: "rice", title: "RICE prioritization" }, { id: "backlog", title: "Backlog" }, { id: "evidence", title: "Evidence & coverage" }, { id: "ask", title: "Ask the interviews" }] },
+    { category: "Reference", items: [{ id: "interviews", title: "Adding interviews" }, { id: "claude", title: "Connecting Claude" }, { id: "privacy", title: "Data & privacy" }, { id: "faq", title: "FAQ" }] },
+  ],
+};
+async function ensureDocs() {
+  return (S.doc.manifest ||= DOCS_MANIFEST);
+}
+const docPages = (m) => m.sidebar.flatMap((c) => c.items.map((it) => ({ ...it, category: c.category })));
+async function fetchDoc(id) {
+  if (docMdCache.has(id)) return docMdCache.get(id);
+  const r = await fetch(`docs/${encodeURIComponent(id)}.md`);
+  if (!r.ok) throw new Error("not found");
+  const t = await r.text();
+  docMdCache.set(id, t);
+  return t;
+}
+function inlineMd(s) {
+  // s is already HTML-escaped; protect code spans, then links/bold/italic
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `\u0000${codes.length - 1}\u0000`; });
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) => { const ext = /^https?:/.test(u); return `<a href="${u}"${ext ? ' target="_blank" rel="noopener noreferrer"' : ""}>${t}</a>`; });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+  return s;
+}
+function renderMarkdown(md) {
+  const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const toc = []; let html = ""; let i = 0;
+  const blockStart = /^(#{1,4}\s|```|>|\s*[-*+]\s|\s*\d+\.\s)/;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^```(\w*)/);
+    if (fence) { i++; const buf = []; while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; } i++; html += `<pre class="code"${fence[1] ? ` data-lang="${esc(fence[1])}"` : ""}><code>${esc(buf.join("\n"))}</code></pre>`; continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { const lvl = h[1].length, text = h[2].trim(), id = slugify(text); if (lvl >= 2 && lvl <= 3) toc.push({ level: lvl, text, id }); html += `<h${lvl} id="${id}">${inlineMd(esc(text))}</h${lvl}>`; i++; continue; }
+    if (/^(\*{3,}|-{3,}|_{3,})\s*$/.test(line)) { html += "<hr>"; i++; continue; }
+    if (/^>\s?/.test(line)) { const buf = []; while (i < lines.length && /^>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^>\s?/, "")); i++; } html += `<blockquote>${inlineMd(esc(buf.join(" ")))}</blockquote>`; continue; }
+    if (/\|/.test(line) && i + 1 < lines.length && /-/.test(lines[i + 1]) && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])) {
+      const cells = (r) => r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+      const header = cells(line); i += 2; const rows = [];
+      while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim()) { rows.push(cells(lines[i])); i++; }
+      html += `<div class="table-wrap"><table><thead><tr>${header.map((c) => `<th>${inlineMd(esc(c))}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${inlineMd(esc(c))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(line)) { const buf = []; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { buf.push(lines[i].replace(/^\s*[-*+]\s+/, "")); i++; } html += `<ul>${buf.map((x) => `<li>${inlineMd(esc(x))}</li>`).join("")}</ul>`; continue; }
+    if (/^\s*\d+\.\s+/.test(line)) { const buf = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { buf.push(lines[i].replace(/^\s*\d+\.\s+/, "")); i++; } html += `<ol>${buf.map((x) => `<li>${inlineMd(esc(x))}</li>`).join("")}</ol>`; continue; }
+    if (!line.trim()) { i++; continue; }
+    const buf = [line]; i++;
+    while (i < lines.length && lines[i].trim() && !blockStart.test(lines[i]) && !/^(\*{3,}|-{3,}|_{3,})\s*$/.test(lines[i]) && !/^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+    html += `<p>${inlineMd(esc(buf.join(" ")))}</p>`;
+  }
+  return { html, toc };
+}
+function vDocs() {
+  const sec = section(`<div class="docs">
+    <nav class="docs-side" id="docs-side" aria-label="Documentation"></nav>
+    <article class="docs-main" id="docs-main"><p class="muted">Loading documentation…</p></article>
+    <nav class="docs-toc" id="docs-toc" aria-label="On this page"></nav>
+  </div>`);
+  mountDocs(sec);
+  return sec;
+}
+async function mountDocs(sec) {
+  let m;
+  try { m = await ensureDocs(); } catch { sec.querySelector("#docs-main").innerHTML = `<div class="notice">Couldn't load the documentation index (docs/docs.json).</div>`; return; }
+  const pages = docPages(m);
+  if (!S.doc.page || !pages.some((p) => p.id === S.doc.page)) S.doc.page = pages[0]?.id || null;
+  const page = S.doc.page;
+  sec.querySelector("#docs-side").innerHTML =
+    `<a class="docs-side-title" href="#docs/${esc(pages[0]?.id || "")}">${esc(m.title)}</a>` +
+    m.sidebar.map((c) => `<div class="docs-cat"><div class="docs-cat-h">${esc(c.category)}</div>${c.items.map((it) => `<a class="docs-link ${it.id === page ? "on" : ""}" href="#docs/${esc(it.id)}">${esc(it.title)}</a>`).join("")}</div>`).join("");
+  const main = sec.querySelector("#docs-main");
+  let md;
+  try { md = await fetchDoc(page); } catch { main.innerHTML = `<div class="notice">That documentation page wasn't found.</div>`; return; }
+  if (S.view !== "docs" || S.doc.page !== page) return; // navigated away while fetching
+  const { html, toc } = renderMarkdown(md);
+  const idx = pages.findIndex((p) => p.id === page);
+  const prev = pages[idx - 1], next = pages[idx + 1];
+  main.innerHTML = `<div class="docs-body">${html}</div>
+    <nav class="docs-pager">${prev ? `<a class="docs-pg" href="#docs/${esc(prev.id)}"><span>« Previous</span><b>${esc(prev.title)}</b></a>` : "<span></span>"}${next ? `<a class="docs-pg next" href="#docs/${esc(next.id)}"><span>Next »</span><b>${esc(next.title)}</b></a>` : "<span></span>"}</nav>`;
+  sec.querySelector("#docs-toc").innerHTML = toc.length
+    ? `<div class="docs-toc-h">On this page</div>${toc.map((t) => `<a class="docs-toc-link lvl${t.level}" href="#${esc(t.id)}" data-tocid="${esc(t.id)}">${esc(t.text)}</a>`).join("")}`
+    : "";
+  sec.querySelectorAll("[data-tocid]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); sec.querySelector(`#${CSS.escape(a.dataset.tocid)}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }));
+  window.scrollTo({ top: 0 });
 }
 
 // ---------- process ----------
