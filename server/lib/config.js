@@ -21,7 +21,7 @@ export const CLI_MODELS = [
 const DEFAULTS = {
   setupDone: false,
   transcriptsDir: "",
-  outputDir: "",
+  outputDir: path.join(ROOT, "demo-output"),
   engine: "api", // "api" = Anthropic API key, "cli" = the Claude Code CLI on this computer
   apiKey: "",
   model: "claude-opus-5-5",

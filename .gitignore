@@ -8,3 +8,7 @@ node_modules/
 
 # instructor-only, never published
 INSTRUCTOR_NOTES.md
+
+# default output folder for the exercise (results are generated here)
+demo-output/*
+!demo-output/.gitkeep
