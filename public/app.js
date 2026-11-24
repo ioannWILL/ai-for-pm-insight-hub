@@ -598,7 +598,7 @@ function bindFolders(root, draft, rerender) {
       draft[b.dataset.pick] = p; rerender();
     },
   })));
-  root.querySelector("[data-samples]").onclick = () => { draft.transcriptsDir = draft.sampleTranscriptsDir; rerender(); };
+  root.querySelector("[data-samples]")?.addEventListener("click", () => { draft.transcriptsDir = draft.sampleTranscriptsDir; rerender(); });
 }
 
 function vSettings() {
